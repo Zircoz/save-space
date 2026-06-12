@@ -1,4 +1,4 @@
-# Agent Skills
+# Save space skills
 
 This repository contains reusable skills for AI agents compatible with the [skills.sh](https://skills.sh) framework.
 
