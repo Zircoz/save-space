@@ -32,7 +32,8 @@ When dispatching subagents, provide them with the following instructions:
    - Old files untouched for a long time (e.g., >6 months).
    - Temporary files, logs, or cache directories.
    - Known build artifacts (e.g., `node_modules`, `dist/`, `.DS_Store`).
-4. **Report Back:** Summarize your findings, highlighting the largest space consumers and best candidates for deletion. Pass this summarized information and metadata back to the orchestrator agent.
+4. **CRITICAL:** You must NEVER delete any files yourself. You are strictly an analyzer.
+5. **Report Back:** Summarize your findings, highlighting the largest space consumers and best candidates for deletion. Pass this summarized information and metadata back to the orchestrator agent.
 
 ### Phase 3: Orchestrator Synthesis & Recommendation
 1. **Aggregate:** As the orchestrator, wait for all subagents to complete their analysis and report back.
@@ -40,8 +41,8 @@ When dispatching subagents, provide them with the following instructions:
 3. **Categorize:** Organize the findings logically (e.g., by file type, by age, by size, or by specific heavy folders).
 4. **Draft Report:** Create a comprehensive and easy-to-read summary report of the directory's disk usage.
 5. **Formulate Recommendations:** Generate a prioritized list of recommendations for the human user regarding which files or directories to delete to optimally reclaim space. Clearly show the potential space saved for each recommendation.
-6. **Human-in-the-loop Approval:** Present the summary and recommendations to the human user. Ask for their explicit approval on which files to delete. **Do NOT delete any files without explicit confirmation from the human.**
+6. **Human-in-the-loop Approval:** Present the summary and recommendations to the human user. Ask for their explicit approval on which files to delete. **You, the orchestrator, must ONLY delete files AFTER receiving explicit confirmation from the human.**
 
 ### Phase 4: Cleanup (Optional)
-1. If the human user approves specific deletion recommendations, execute the deletions safely.
+1. If the human user approves specific deletion recommendations, execute the deletions safely yourself as the orchestrator.
 2. Provide a final brief report detailing what was deleted and the total disk space successfully reclaimed.
