@@ -1,48 +1,89 @@
 ---
 name: disk-cleanup-orchestrator
-description: Orchestrates subagents to analyze a directory recursively, gather file metadata, and provide disk cleanup recommendations for a human.
+description: Analyze a directory to find what is consuming disk space and recommend safe deletions for a human to approve. Use when asked to free up disk space, find large/old files, clean build artifacts/caches, or audit a folder's storage usage. Fans out to subagents only for very large trees.
 ---
 
 # Disk Cleanup Orchestrator
 
-This skill allows you to act as an orchestrator to manage multiple subagents. Together, you will recursively analyze a specified folder, gather detailed file metadata, and present disk cleanup recommendations to a human-in-the-loop.
+Find what is eating disk space in a target directory and produce a prioritized,
+human-approved cleanup plan. Lean on shell tools for measurement (they aggregate
+far faster than per-file inspection) and use agents only for judgment.
 
 ## When to Use
-Use this skill when the user asks for help cleaning up their disk space, finding large or old files, or analyzing a directory to free up storage.
+The user wants to free up disk space, find large or old files, clear caches /
+build artifacts, or understand where storage is going in a directory.
 
-## Steps
+## Core Rules
+- **Measure with the shell, not per-file loops.** `du`, `find -size`, and
+  `find -mtime` aggregate in one pass. Never `stat`/`file` every file.
+- **Never delete without explicit per-item human approval.** Analysis is
+  read-only until then.
+- **Stay inside the target.** Every path acted on must be under the directory
+  the user named. Never touch paths outside it.
+- **Don't trust extensions alone for "safe to delete."** A `node_modules` or
+  `dist/` may belong to an active project; flag, don't assume.
 
-### Phase 1: Planning & Subagent Dispatch
-1. **Identify Target:** If not already provided, ask the human user which directory they want to analyze for disk cleanup.
-2. **Initial Assessment:** Do a quick initial scan using standard shell tools (e.g., `find`, `du`) to understand the scope and scale of the directory.
-3. **Task Partitioning:** Divide the work. You can assign different subdirectories or chunks of files to different subagents.
-4. **Dispatch Subagents:** Launch the subagents in parallel using your agent dispatching capabilities. Provide them with their specific target paths and the instructions from "Phase 2".
+## Step 1 — Scope
+If the user didn't name a directory, ask which one. Confirm the absolute path
+(`realpath`) so all later commands and the final deletions are unambiguous.
 
-### Phase 2: Subagent Execution (Instructions for Subagents)
-When dispatching subagents, provide them with the following instructions:
-1. Recursively iterate through your assigned folder or list of files.
-2. For each file, collect the following metadata:
-   - **File path**
-   - **File size**
-   - **Mimetype** (e.g., using `file --mime-type <file>` or `mimetype <file>`)
-   - **Creation date**
-   - **Last modified date**
-3. Analyze the files to identify potential candidates for deletion. Look for:
-   - Extremely large files (e.g., >100MB).
-   - Old files untouched for a long time (e.g., >6 months).
-   - Temporary files, logs, or cache directories.
-   - Known build artifacts (e.g., `node_modules`, `dist/`, `.DS_Store`).
-4. **CRITICAL:** You must NEVER delete any files yourself. You are strictly an analyzer.
-5. **Report Back:** Summarize your findings, highlighting the largest space consumers and best candidates for deletion. Pass this summarized information and metadata back to the orchestrator agent.
+## Step 2 — Fast aggregate scan (orchestrator, always)
+Run these directly — they answer most cleanup questions without any subagents:
 
-### Phase 3: Orchestrator Synthesis & Recommendation
-1. **Aggregate:** As the orchestrator, wait for all subagents to complete their analysis and report back.
-2. **Synthesize:** Aggregate the summaries and metadata provided by the subagents.
-3. **Categorize:** Organize the findings logically (e.g., by file type, by age, by size, or by specific heavy folders).
-4. **Draft Report:** Create a comprehensive and easy-to-read summary report of the directory's disk usage.
-5. **Formulate Recommendations:** Generate a prioritized list of recommendations for the human user regarding which files or directories to delete to optimally reclaim space. Clearly show the potential space saved for each recommendation.
-6. **Human-in-the-loop Approval:** Present the summary and recommendations to the human user. Ask for their explicit approval on which files to delete. **You, the orchestrator, must ONLY delete files AFTER receiving explicit confirmation from the human.**
+```bash
+TARGET="/absolute/path"
 
-### Phase 4: Cleanup (Optional)
-1. If the human user approves specific deletion recommendations, execute the deletions safely yourself as the orchestrator.
-2. Provide a final brief report detailing what was deleted and the total disk space successfully reclaimed.
+# Total size and the heaviest top-level subdirectories
+du -sh "$TARGET"
+du -h -d1 "$TARGET" | sort -rh | head -30
+
+# Largest individual files (size-sorted, no per-file calls)
+find "$TARGET" -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -30
+
+# Files not modified in 6+ months (mtime is reliable; birth time often is not)
+find "$TARGET" -type f -mtime +180 -printf '%s\t%TY-%Tm-%Td\t%p\n' 2>/dev/null \
+  | sort -rn | head -30
+
+# Common reclaimable patterns and their sizes
+find "$TARGET" \( -name node_modules -o -name .venv -o -name dist -o -name build \
+  -o -name target -o -name __pycache__ -o -name .cache -o -name .DS_Store \) \
+  -prune -print 2>/dev/null | xargs -r du -sh 2>/dev/null | sort -rh | head -30
+```
+
+Note: use modification time (`-mtime`/`%T`) for "old". Creation/birth time is
+unavailable on many Linux filesystems and should not be relied on.
+
+## Step 3 — Decide whether to fan out
+- **Default (single agent):** For typical directories, the Step 2 output is
+  enough. Skip subagents and go to Step 4.
+- **Fan out only when** the tree is very large (e.g. tens of GB / many heavy
+  subtrees) and the heavy subdirectories from `du -d1` are roughly independent.
+  Assign **one heavy subtree per subagent** so they don't rescan shared paths.
+
+Subagent brief (when used):
+> Analyze only `<subtree>`. Run the Step 2 commands scoped to it. Report back a
+> short summary: total size, top space consumers, deletion candidates (with
+> size, age, and category), and any items that look risky to delete (active
+> project deps, recently used, ambiguous). Return aggregated findings only — no
+> per-file dumps. **Do not delete anything.**
+
+## Step 4 — Synthesize & recommend
+Aggregate findings (from the scan and any subagents) into a report the user can
+act on. Categorize candidates and quantify the win:
+
+| Category | Path | Size | Last modified | Reclaimable | Confidence |
+|----------|------|------|---------------|-------------|------------|
+| Build artifact | … | … | … | … | high / med / low |
+
+Order recommendations by reclaimable space × confidence. Call out anything
+ambiguous explicitly rather than burying it. Show the running total of space
+that would be freed.
+
+## Step 5 — Human approval & cleanup
+1. Present the report and ask which items to delete. Wait for **explicit**
+   confirmation — do not infer approval.
+2. Before deleting, re-confirm every target path is under `$TARGET`.
+3. Prefer recoverable deletion when available (`trash`/`gio trash`); otherwise
+   delete with exact, listed paths — never a broad glob or unscoped `rm -rf`.
+4. Report what was deleted and the actual space reclaimed (`du -sh "$TARGET"`
+   before vs. after).
